@@ -124,15 +124,16 @@
     let autoRefreshTimer = null;
     let countdown = 30;
     let busDataCache = { 0: [], 1: [] };
-    let realTimeBuses = []; // 即時公車位置
+    let realTimeBuses = [];
     let isExpanded = false;
 
     function initMap() {
       map = L.map('map', { zoomControl: false }).setView([25.0478, 121.5170], 13);
       
-      L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-        maxZoom: 20
+      // 使用 OpenStreetMap (OSM) 完全免費、免 Key 官方圖資[span_1](start_span)[span_1](end_span)
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19
       }).addTo(map);
 
       L.control.zoom({ position: 'topright' }).addTo(map);
@@ -177,7 +178,6 @@
       showLoadingBanner(true);
 
       try {
-        // 1. 抓取預估到站時間
         let response = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
         let data = await response.json();
 
@@ -195,7 +195,6 @@
           return;
         }
 
-        // 2. 抓取即時公車位置 API (RealTimeByFrequency)
         try {
           let busPosRes = await fetchWithRetry(`${RENDER_PROXY_URL}/RealTimeByFrequency/City/${currentCity}?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
           realTimeBuses = await busPosRes.json();
@@ -238,7 +237,6 @@
       let bounds = [];
       let routeCoordinates = [];
 
-      // 畫站牌
       stops.forEach((stop, index) => {
         const seqNum = stop.StopSequence !== undefined ? stop.StopSequence : (stop.Seq !== undefined ? stop.Seq : index + 1);
         const stopName = stop.StopName?.Zh_tw || '未知名稱';
@@ -275,17 +273,15 @@
         }
       });
 
-      // 1. 畫路線軌跡虛線
       if (routeCoordinates.length > 1) {
         L.polyline(routeCoordinates, {
-          color: '#3b82f6',
+          color: '#2563eb',
           weight: 4,
           opacity: 0.6,
           dashArray: '6, 8'
         }).addTo(markersLayer);
       }
 
-      // 2. 標記線上移動的公車小圖示 (即時位置)
       const currentDirBuses = realTimeBuses.filter(b => b.Direction === currentDirection && b.BusPosition);
       currentDirBuses.forEach(bus => {
         const busLat = bus.BusPosition.PositionLat;
