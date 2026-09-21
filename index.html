@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>雙北公車即時動態追蹤</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Leaflet.js CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- FontAwesome 圖示 -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+  <style>
+    /* 手機全螢幕地圖與滑動抽屜 */
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    #map {
+      height: 100%;
+      width: 100%;
+      z-index: 1;
+    }
+    .bottom-sheet {
+      transition: transform 0.3s cubic-bezier(0, 0, 0.2, 1);
+      z-index: 1000;
+    }
+    .sheet-collapsed {
+      transform: translateY(calc(100% - 140px));
+    }
+    .sheet-expanded {
+      transform: translateY(0);
+    }
+    /* 隱藏滾動條 */
+    .no-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .no-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+  </style>
+</head>
+<body class="bg-gray-100 relative">
+
+  <!-- 上方狀態與通知列 -->
+  <div id="status-banner" class="hidden absolute top-4 left-4 right-4 z-[1001] bg-amber-500 text-white px-4 py-2.5 rounded-2xl shadow-lg flex items-center justify-between text-xs sm:text-sm animate-bounce">
+    <div class="flex items-center gap-2">
+      <i class="fa-solid fa-spinner fa-spin text-base"></i>
+      <span>伺服器正在啟動中（首次載入需約 30 秒），請稍候...</span>
+    </div>
+  </div>
+
+  <!-- 地圖容器 -->
+  <div id="map"></div>
+
+  <!-- 手機優化：底部滑動抽屜 (Bottom Sheet) -->
+  <div id="bottom-sheet" class="bottom-sheet sheet-collapsed fixed inset-x-0 bottom-0 max-w-lg mx-auto bg-white rounded-t-3xl shadow-2xl flex flex-col max-h-[85vh] border-t border-gray-100">
+    
+    <!-- 抽屜頂部手把與搜尋列 -->
+    <div class="p-4 pb-2 cursor-pointer border-b border-gray-100 bg-white rounded-t-3xl" onclick="toggleSheet()">
+      <div class="w-12 h-1.5 bg-gray-300 rounded-full mx-auto mb-3"></div>
+      
+      <!-- 搜尋輸入框 -->
+      <div class="flex gap-2" onclick="event.stopPropagation()">
+        <div class="relative flex-1">
+          <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
+          <input type="text" id="route-input" placeholder="搜尋公車號碼 (如: 307, 承德幹線)" 
+                 class="w-full pl-9 pr-4 py-2.5 bg-gray-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium">
+        </div>
+        <button onclick="searchBusRoute()" class="bg-blue-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95 transition">
+          搜尋
+        </button>
+      </div>
+
+      <!-- 路線方向切換頁籤 (搜尋後顯示) -->
+      <div id="direction-tabs" class="hidden flex gap-2 mt-3">
+        <button id="tab-go" onclick="switchDirection(0)" class="flex-1 py-1.5 rounded-lg text-xs font-bold bg-blue-50 text-blue-600 border border-blue-200">
+          去程 (載入中...)
+        </button>
+        <button id="tab-back" onclick="switchDirection(1)" class="flex-1 py-1.5 rounded-lg text-xs font-bold bg-gray-50 text-gray-500 border border-gray-200">
+          返程 (載入中...)
+        </button>
+      </div>
+    </div>
+
+    <!-- 公車到站動態列表區域 -->
+    <div class="flex-1 overflow-y-auto p-4 space-y-2 no-scrollbar" id="stop-list">
+      <div class="text-center py-8 text-gray-400 text-sm">
+        <i class="fa-solid fa-bus text-3xl mb-2 text-gray-300"></i>
+        <p>請輸入公車路線開始查詢</p>
+      </div>
+    </div>
+
+    <!-- 底部重新整理與資訊欄 -->
+    <div class="p-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
+      <div class="flex items-center gap-1.5">
+        <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span id="update-timer">自動更新：30s</span>
+      </div>
+      <button onclick="refreshData()" class="text-blue-600 font-medium flex items-center gap-1 active:rotate-180 transition">
+        <i class="fa-solid fa-rotate-right"></i> 手動更新
+      </button>
+    </div>
+  </div>
+
+  <script>
+    // 你的 Render 後端代理伺服器 URL[span_0](start_span)[span_0](end_span)
+    const RENDER_PROXY_URL = 'https://bus-api-tw.onrender.com/api/bus';
+
+    let map;
+    let markersLayer;
+    let currentRouteName = '';
+    let currentCity = 'Taipei'; // 預設台北市，自動聯營搜尋
+    let currentDirection = 0; // 0: 去程, 1: 返程
+    let autoRefreshTimer = null;
+    let countdown = 30;
+    let busDataCache = { 0: [], 1: [] };
+
+    // 初始化地圖
+    function initMap() {
+      // 預設中心點位置：台北車站
+      map = L.map('map', { zoomControl: false }).setView([25.0478, 121.5170], 13);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap'
+      }).addTo(map);
+
+      // 地圖縮放按鈕改至右上角（避免被手機底部抽屜遮擋）
+      L.control.zoom({ position: 'topright' }).addTo(map);
+      markersLayer = L.layerGroup().addTo(map);
+    }
+
+    // 手機抽屜展開 / 折疊
+    function toggleSheet() {
+      const sheet = document.getElementById('bottom-sheet');
+      if (sheet.classList.contains('sheet-collapsed')) {
+        sheet.classList.remove('sheet-collapsed');
+        sheet.classList.add('sheet-expanded');
+      } else {
+        sheet.classList.remove('sheet-expanded');
+        sheet.classList.add('sheet-collapsed');
+      }
+    }
+
+    function expandSheet() {
+      const sheet = document.getElementById('bottom-sheet');
+      sheet.classList.remove('sheet-collapsed');
+      sheet.classList.add('sheet-expanded');
+    }
+
+    // 搜尋公車路線
+    async function searchBusRoute() {
+      const input = document.getElementById('route-input').value.trim();
+      if (!input) return;
+
+      currentRouteName = input;
+      showLoadingBanner(true);
+
+      try {
+        // 先嘗試抓臺北市，若無則抓新北市
+        let response = await fetch(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
+        let data = await response.json();
+
+        if (!data || data.length === 0) {
+          response = await fetch(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/NewTaipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
+          data = await response.json();
+          currentCity = 'NewTaipei';
+        } else {
+          currentCity = 'Taipei';
+        }
+
+        if (!data || data.length === 0) {
+          alert('找不到該公車路線，請確認車號是否正確！');
+          showLoadingBanner(false);
+          return;
+        }
+
+        // 分類去程與返程
+        busDataCache[0] = data.filter(d => d.Direction === 0).sort((a,b) => a.StopSequence - b.StopSequence);
+        busDataCache[1] = data.filter(d => d.Direction === 1).sort((a,b) => a.StopSequence - b.StopSequence);
+
+        // 更新方向頁籤標題
+        document.getElementById('direction-tabs').classList.remove('hidden');
+        document.getElementById('tab-go').innerText = `往 ${busDataCache[0][0]?.DestinationStopNameZh || '去程'}`;
+        document.getElementById('tab-back').innerText = `往 ${busDataCache[1][0]?.DestinationStopNameZh || '返程'}`;
+
+        renderStops();
+        startAutoRefresh();
+        expandSheet();
+      } catch (err) {
+        console.error('Fetch error:', err);
+        alert('連線失敗，請稍後再試！');
+      } finally {
+        showLoadingBanner(false);
+      }
+    }
+
+    // 渲染站牌與預估到站時間
+    function renderStops() {
+      const listContainer = document.getElementById('stop-list');
+      const stops = busDataCache[currentDirection] || [];
+
+      if (stops.length === 0) {
+        listContainer.innerHTML = '<div class="text-center py-6 text-gray-400 text-sm">目前無此方向車次動態</div>';
+        return;
+      }
+
+      markersLayer.clearLayers();
+      let html = '';
+      let bounds = [];
+
+      stops.forEach((stop) => {
+        const timeStatus = formatEstimateTime(stop.EstimateTime, stop.StopStatus);
+
+        html += `
+          <div class="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100 hover:bg-blue-50 transition">
+            <div class="flex items-center gap-3">
+              <span class="w-6 h-6 rounded-full bg-blue-100 text-blue-600 font-bold text-xs flex items-center justify-center">
+                ${stop.StopSequence}
+              </span>
+              <span class="font-bold text-gray-800 text-sm">${stop.StopName.Zh_tw}</span>
+            </div>
+            <span class="px-2.5 py-1 rounded-lg text-xs font-bold ${timeStatus.bgClass}">
+              ${timeStatus.text}
+            </span>
+          </div>
+        `;
+
+        // 在地圖上加上標記
+        if (stop.StopPosition) {
+          const lat = stop.StopPosition.PositionLat;
+          const lng = stop.StopPosition.PositionLon;
+          bounds.push([lat, lng]);
+
+          L.circleMarker([lat, lng], {
+            radius: 6,
+            fillColor: timeStatus.color,
+            color: '#fff',
+            weight: 2,
+            fillOpacity: 0.9
+          }).bindPopup(`<b>${stop.StopName.Zh_tw}</b><br>預估到站：${timeStatus.text}`)
+            .addTo(markersLayer);
+        }
+      });
+
+      listContainer.innerHTML = html;
+
+      // 移動地圖視角以包含所有站牌
+      if (bounds.length > 0) {
+        map.fitBounds(bounds, { padding: [50, 50] });
+      }
+    }
+
+    // 格式化預估到站時間
+    function formatEstimateTime(seconds, status) {
+      if (status === 1) return { text: '尚未發車', bgClass: 'bg-gray-200 text-gray-600', color: '#9CA3AF' };
+      if (status === 2) return { text: '交管不停靠', bgClass: 'bg-gray-200 text-gray-600', color: '#9CA3AF' };
+      if (status === 3) return { text: '末班車已過', bgClass: 'bg-gray-200 text-gray-600', color: '#9CA3AF' };
+      if (status === 4) return { text: '今日未營運', bgClass: 'bg-gray-200 text-gray-600', color: '#9CA3AF' };
+
+      if (seconds === undefined || seconds === null) return { text: '離站', bgClass: 'bg-gray-100 text-gray-400', color: '#D1D5DB' };
+
+      const min = Math.floor(seconds / 60);
+      if (min < 1) return { text: '進站中', bgClass: 'bg-red-500 text-white animate-pulse', color: '#EF4444' };
+      if (min <= 3) return { text: '即將到站', bgClass: 'bg-amber-500 text-white', color: '#F59E0B' };
+      return { text: `${min} 分鐘`, bgClass: 'bg-emerald-100 text-emerald-700', color: '#10B981' };
+    }
+
+    // 切換方向 (去程 / 返程)
+    function switchDirection(dir) {
+      currentDirection = dir;
+      const tabGo = document.getElementById('tab-go');
+      const tabBack = document.getElementById('tab-back');
+
+      if (dir === 0) {
+        tabGo.className = 'flex-1 py-1.5 rounded-lg text-xs font-bold bg-blue-50 text-blue-600 border border-blue-200';
+        tabBack.className = 'flex-1 py-1.5 rounded-lg text-xs font-bold bg-gray-50 text-gray-500 border border-gray-200';
+      } else {
+        tabBack.className = 'flex-1 py-1.5 rounded-lg text-xs font-bold bg-blue-50 text-blue-600 border border-blue-200';
+        tabGo.className = 'flex-1 py-1.5 rounded-lg text-xs font-bold bg-gray-50 text-gray-500 border border-gray-200';
+      }
+
+      renderStops();
+    }
+
+    // 自動與手動更新機制
+    function startAutoRefresh() {
+      clearInterval(autoRefreshTimer);
+      countdown = 30;
+      autoRefreshTimer = setInterval(() => {
+        countdown--;
+        document.getElementById('update-timer').innerText = `自動更新：${countdown}s`;
+        if (countdown <= 0) {
+          refreshData();
+        }
+      }, 1000);
+    }
+
+    async function refreshData() {
+      if (!currentRouteName) return;
+      await searchBusRoute();
+    }
+
+    function showLoadingBanner(show) {
+      const banner = document.getElementById('status-banner');
+      if (show) {
+        banner.classList.remove('hidden');
+      } else {
+        banner.classList.add('hidden');
+      }
+    }
+
+    // 初始化頁面
+    window.onload = () => {
+      initMap();
+    };
+  </script>
+</body>
+</html>
