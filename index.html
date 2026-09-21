@@ -14,7 +14,6 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
   <style>
-    /* 手機全螢幕地圖與滑動抽屜 */
     html, body {
       height: 100%;
       margin: 0;
@@ -26,18 +25,12 @@
       height: 100%;
       width: 100%;
       z-index: 1;
+      background-color: #f8f9fa;
     }
     .bottom-sheet {
-      transition: transform 0.3s cubic-bezier(0, 0, 0.2, 1);
+      transition: transform 0.25s ease-out;
       z-index: 1000;
     }
-    .sheet-collapsed {
-      transform: translateY(calc(100% - 140px));
-    }
-    .sheet-expanded {
-      transform: translateY(0);
-    }
-    /* 隱藏滾動條 */
     .no-scrollbar::-webkit-scrollbar {
       display: none;
     }
@@ -49,29 +42,29 @@
 </head>
 <body class="bg-gray-100 relative">
 
-  <!-- 上方狀態與通知列 -->
+  <!-- 上方狀態通知列 -->
   <div id="status-banner" class="hidden absolute top-4 left-4 right-4 z-[1001] bg-amber-500 text-white px-4 py-2.5 rounded-2xl shadow-lg flex items-center justify-between text-xs sm:text-sm animate-bounce">
     <div class="flex items-center gap-2">
       <i class="fa-solid fa-spinner fa-spin text-base"></i>
-      <span>伺服器正在啟動中（首次載入需約 30 秒），請稍候...</span>
+      <span>伺服器正在連線中，請稍候...</span>
     </div>
   </div>
 
   <!-- 地圖容器 -->
   <div id="map"></div>
 
-  <!-- 手機優化：底部滑動抽屜 (Bottom Sheet) -->
-  <div id="bottom-sheet" class="bottom-sheet sheet-collapsed fixed inset-x-0 bottom-0 max-w-lg mx-auto bg-white rounded-t-3xl shadow-2xl flex flex-col max-h-[85vh] border-t border-gray-100">
+  <!-- 底部滑動抽屜 (Bottom Sheet) -->
+  <div id="bottom-sheet" class="bottom-sheet fixed inset-x-0 bottom-0 max-w-lg mx-auto bg-white rounded-t-3xl shadow-2xl flex flex-col max-h-[85vh] border-t border-gray-100 transform translate-y-[calc(100%-140px)]">
     
-    <!-- 抽屜頂部手把與搜尋列 -->
-    <div class="p-4 pb-2 cursor-pointer border-b border-gray-100 bg-white rounded-t-3xl" onclick="toggleSheet()">
-      <div class="w-12 h-1.5 bg-gray-300 rounded-full mx-auto mb-3"></div>
+    <!-- 頂部手把與搜尋列（支援手勢拖曳） -->
+    <div id="sheet-header" class="p-4 pb-2 bg-white rounded-t-3xl select-none touch-none">
+      <div class="w-12 h-1.5 bg-gray-300 rounded-full mx-auto mb-3 cursor-pointer" onclick="toggleSheet()"></div>
       
-      <!-- 搜尋輸入框 -->
-      <div class="flex gap-2" onclick="event.stopPropagation()">
+      <!-- 搜尋列 -->
+      <div class="flex gap-2">
         <div class="relative flex-1">
           <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
-          <input type="text" id="route-input" placeholder="搜尋公車號碼 (如: 307, 承德幹線)" 
+          <input type="text" id="route-input" placeholder="搜尋公車 (如: 307, 667, 承德幹線)" 
                  class="w-full pl-9 pr-4 py-2.5 bg-gray-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium">
         </div>
         <button onclick="searchBusRoute()" class="bg-blue-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95 transition">
@@ -79,18 +72,18 @@
         </button>
       </div>
 
-      <!-- 路線方向切換頁籤 (搜尋後顯示) -->
+      <!-- 去程/返程 切換頁籤 -->
       <div id="direction-tabs" class="hidden flex gap-2 mt-3">
         <button id="tab-go" onclick="switchDirection(0)" class="flex-1 py-1.5 rounded-lg text-xs font-bold bg-blue-50 text-blue-600 border border-blue-200">
-          去程 (載入中...)
+          往 去程
         </button>
         <button id="tab-back" onclick="switchDirection(1)" class="flex-1 py-1.5 rounded-lg text-xs font-bold bg-gray-50 text-gray-500 border border-gray-200">
-          返程 (載入中...)
+          往 返程
         </button>
       </div>
     </div>
 
-    <!-- 公車到站動態列表區域 -->
+    <!-- 公車動態列表 -->
     <div class="flex-1 overflow-y-auto p-4 space-y-2 no-scrollbar" id="stop-list">
       <div class="text-center py-8 text-gray-400 text-sm">
         <i class="fa-solid fa-bus text-3xl mb-2 text-gray-300"></i>
@@ -98,7 +91,7 @@
       </div>
     </div>
 
-    <!-- 底部重新整理與資訊欄 -->
+    <!-- 底部更新狀態欄 -->
     <div class="p-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
       <div class="flex items-center gap-1.5">
         <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
@@ -111,50 +104,81 @@
   </div>
 
   <script>
-    // 你的 Render 後端代理伺服器 URL[span_0](start_span)[span_0](end_span)
     const RENDER_PROXY_URL = 'https://bus-api-tw.onrender.com/api/bus';
 
     let map;
     let markersLayer;
     let currentRouteName = '';
-    let currentCity = 'Taipei'; // 預設台北市，自動聯營搜尋
-    let currentDirection = 0; // 0: 去程, 1: 返程
+    let currentCity = 'Taipei';
+    let currentDirection = 0;
     let autoRefreshTimer = null;
     let countdown = 30;
     let busDataCache = { 0: [], 1: [] };
+    let isExpanded = false;
 
-    // 初始化地圖
     function initMap() {
-      // 預設中心點位置：台北車站
       map = L.map('map', { zoomControl: false }).setView([25.0478, 121.5170], 13);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap'
+      
+      // 使用 CartoDB Positron 簡約淡雅風格圖資 (乾淨不花雜)
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+        subdomains: 'abcd',
+        maxZoom: 20
       }).addTo(map);
 
-      // 地圖縮放按鈕改至右上角（避免被手機底部抽屜遮擋）
       L.control.zoom({ position: 'topright' }).addTo(map);
       markersLayer = L.layerGroup().addTo(map);
     }
 
-    // 手機抽屜展開 / 折疊
-    function toggleSheet() {
-      const sheet = document.getElementById('bottom-sheet');
-      if (sheet.classList.contains('sheet-collapsed')) {
-        sheet.classList.remove('sheet-collapsed');
-        sheet.classList.add('sheet-expanded');
-      } else {
-        sheet.classList.remove('sheet-expanded');
-        sheet.classList.add('sheet-collapsed');
+    // 手勢拖曳滑動抽屜
+    const sheet = document.getElementById('bottom-sheet');
+    const header = document.getElementById('sheet-header');
+    let startY = 0;
+    let currentY = 0;
+
+    header.addEventListener('touchstart', (e) => {
+      startY = e.touches[0].clientY;
+    });
+
+    header.addEventListener('touchmove', (e) => {
+      currentY = e.touches[0].clientY;
+      const diff = currentY - startY;
+      
+      if (diff > 50 && isExpanded) {
+        collapseSheet();
+      } 
+      else if (diff < -50 && !isExpanded) {
+        expandSheet();
       }
+    });
+
+    function toggleSheet() {
+      if (isExpanded) collapseSheet();
+      else expandSheet();
     }
 
     function expandSheet() {
-      const sheet = document.getElementById('bottom-sheet');
-      sheet.classList.remove('sheet-collapsed');
-      sheet.classList.add('sheet-expanded');
+      sheet.style.transform = 'translateY(0)';
+      isExpanded = true;
     }
 
-    // 搜尋公車路線
+    function collapseSheet() {
+      sheet.style.transform = 'translateY(calc(100% - 140px))';
+      isExpanded = false;
+    }
+
+    async function fetchWithRetry(url, retries = 2, delay = 2000) {
+      for (let i = 0; i < retries; i++) {
+        try {
+          const response = await fetch(url);
+          if (response.ok) return response;
+        } catch (err) {
+          if (i === retries - 1) throw err;
+          await new Promise(res => setTimeout(res, delay));
+        }
+      }
+    }
+
     async function searchBusRoute() {
       const input = document.getElementById('route-input').value.trim();
       if (!input) return;
@@ -163,12 +187,11 @@
       showLoadingBanner(true);
 
       try {
-        // 先嘗試抓臺北市，若無則抓新北市
-        let response = await fetch(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
+        let response = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
         let data = await response.json();
 
         if (!data || data.length === 0) {
-          response = await fetch(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/NewTaipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
+          response = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/NewTaipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
           data = await response.json();
           currentCity = 'NewTaipei';
         } else {
@@ -181,11 +204,11 @@
           return;
         }
 
-        // 分類去程與返程
-        busDataCache[0] = data.filter(d => d.Direction === 0).sort((a,b) => a.StopSequence - b.StopSequence);
-        busDataCache[1] = data.filter(d => d.Direction === 1).sort((a,b) => a.StopSequence - b.StopSequence);
+        const getSeq = (item) => item.StopSequence !== undefined ? item.StopSequence : (item.Seq || 0);
 
-        // 更新方向頁籤標題
+        busDataCache[0] = data.filter(d => d.Direction === 0).sort((a,b) => getSeq(a) - getSeq(b));
+        busDataCache[1] = data.filter(d => d.Direction === 1).sort((a,b) => getSeq(a) - getSeq(b));
+
         document.getElementById('direction-tabs').classList.remove('hidden');
         document.getElementById('tab-go').innerText = `往 ${busDataCache[0][0]?.DestinationStopNameZh || '去程'}`;
         document.getElementById('tab-back').innerText = `往 ${busDataCache[1][0]?.DestinationStopNameZh || '返程'}`;
@@ -195,13 +218,12 @@
         expandSheet();
       } catch (err) {
         console.error('Fetch error:', err);
-        alert('連線失敗，請稍後再試！');
+        alert('連線超時，請點擊搜尋再試一次！');
       } finally {
         showLoadingBanner(false);
       }
     }
 
-    // 渲染站牌與預估到站時間
     function renderStops() {
       const listContainer = document.getElementById('stop-list');
       const stops = busDataCache[currentDirection] || [];
@@ -215,24 +237,25 @@
       let html = '';
       let bounds = [];
 
-      stops.forEach((stop) => {
+      stops.forEach((stop, index) => {
+        const seqNum = stop.StopSequence !== undefined ? stop.StopSequence : (stop.Seq !== undefined ? stop.Seq : index + 1);
+        const stopName = stop.StopName?.Zh_tw || '未知名稱';
         const timeStatus = formatEstimateTime(stop.EstimateTime, stop.StopStatus);
 
         html += `
           <div class="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100 hover:bg-blue-50 transition">
             <div class="flex items-center gap-3">
-              <span class="w-6 h-6 rounded-full bg-blue-100 text-blue-600 font-bold text-xs flex items-center justify-center">
-                ${stop.StopSequence}
+              <span class="w-6 h-6 rounded-full bg-blue-100 text-blue-600 font-bold text-xs flex items-center justify-center flex-shrink-0">
+                ${seqNum}
               </span>
-              <span class="font-bold text-gray-800 text-sm">${stop.StopName.Zh_tw}</span>
+              <span class="font-bold text-gray-800 text-sm">${stopName}</span>
             </div>
-            <span class="px-2.5 py-1 rounded-lg text-xs font-bold ${timeStatus.bgClass}">
+            <span class="px-2.5 py-1 rounded-lg text-xs font-bold ${timeStatus.bgClass} flex-shrink-0">
               ${timeStatus.text}
             </span>
           </div>
         `;
 
-        // 在地圖上加上標記
         if (stop.StopPosition) {
           const lat = stop.StopPosition.PositionLat;
           const lng = stop.StopPosition.PositionLon;
@@ -241,23 +264,21 @@
           L.circleMarker([lat, lng], {
             radius: 6,
             fillColor: timeStatus.color,
-            color: '#fff',
+            color: '#ffffff',
             weight: 2,
-            fillOpacity: 0.9
-          }).bindPopup(`<b>${stop.StopName.Zh_tw}</b><br>預估到站：${timeStatus.text}`)
+            fillOpacity: 1
+          }).bindPopup(`<b>${stopName}</b><br>預估到站：${timeStatus.text}`)
             .addTo(markersLayer);
         }
       });
 
       listContainer.innerHTML = html;
 
-      // 移動地圖視角以包含所有站牌
       if (bounds.length > 0) {
         map.fitBounds(bounds, { padding: [50, 50] });
       }
     }
 
-    // 格式化預估到站時間
     function formatEstimateTime(seconds, status) {
       if (status === 1) return { text: '尚未發車', bgClass: 'bg-gray-200 text-gray-600', color: '#9CA3AF' };
       if (status === 2) return { text: '交管不停靠', bgClass: 'bg-gray-200 text-gray-600', color: '#9CA3AF' };
@@ -272,7 +293,6 @@
       return { text: `${min} 分鐘`, bgClass: 'bg-emerald-100 text-emerald-700', color: '#10B981' };
     }
 
-    // 切換方向 (去程 / 返程)
     function switchDirection(dir) {
       currentDirection = dir;
       const tabGo = document.getElementById('tab-go');
@@ -289,7 +309,6 @@
       renderStops();
     }
 
-    // 自動與手動更新機制
     function startAutoRefresh() {
       clearInterval(autoRefreshTimer);
       countdown = 30;
@@ -309,14 +328,10 @@
 
     function showLoadingBanner(show) {
       const banner = document.getElementById('status-banner');
-      if (show) {
-        banner.classList.remove('hidden');
-      } else {
-        banner.classList.add('hidden');
-      }
+      if (show) banner.classList.remove('hidden');
+      else banner.classList.add('hidden');
     }
 
-    // 初始化頁面
     window.onload = () => {
       initMap();
     };
