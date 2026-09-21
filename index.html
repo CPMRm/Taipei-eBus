@@ -38,6 +38,16 @@
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
+    /* 公車 Icon 樣式 */
+    .bus-icon-marker {
+      background: #2563eb;
+      color: white;
+      border: 2px solid white;
+      border-radius: 50%;
+      text-align: center;
+      line-height: 28px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
   </style>
 </head>
 <body class="bg-gray-100 relative">
@@ -114,12 +124,12 @@
     let autoRefreshTimer = null;
     let countdown = 30;
     let busDataCache = { 0: [], 1: [] };
+    let realTimeBuses = []; // 即時公車位置
     let isExpanded = false;
 
     function initMap() {
       map = L.map('map', { zoomControl: false }).setView([25.0478, 121.5170], 13);
       
-      // 使用方案 1：CartoDB 免 Key 相容網址 (無浮水印)
       L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
         maxZoom: 20
@@ -129,42 +139,23 @@
       markersLayer = L.layerGroup().addTo(map);
     }
 
-    // 手勢拖曳滑動抽屜
+    // 手勢滑動抽屜
     const sheet = document.getElementById('bottom-sheet');
     const header = document.getElementById('sheet-header');
     let startY = 0;
     let currentY = 0;
 
-    header.addEventListener('touchstart', (e) => {
-      startY = e.touches[0].clientY;
-    });
-
+    header.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; });
     header.addEventListener('touchmove', (e) => {
       currentY = e.touches[0].clientY;
       const diff = currentY - startY;
-      
-      if (diff > 50 && isExpanded) {
-        collapseSheet();
-      } 
-      else if (diff < -50 && !isExpanded) {
-        expandSheet();
-      }
+      if (diff > 50 && isExpanded) collapseSheet();
+      else if (diff < -50 && !isExpanded) expandSheet();
     });
 
-    function toggleSheet() {
-      if (isExpanded) collapseSheet();
-      else expandSheet();
-    }
-
-    function expandSheet() {
-      sheet.style.transform = 'translateY(0)';
-      isExpanded = true;
-    }
-
-    function collapseSheet() {
-      sheet.style.transform = 'translateY(calc(100% - 140px))';
-      isExpanded = false;
-    }
+    function toggleSheet() { if (isExpanded) collapseSheet(); else expandSheet(); }
+    function expandSheet() { sheet.style.transform = 'translateY(0)'; isExpanded = true; }
+    function collapseSheet() { sheet.style.transform = 'translateY(calc(100% - 140px))'; isExpanded = false; }
 
     async function fetchWithRetry(url, retries = 2, delay = 2000) {
       for (let i = 0; i < retries; i++) {
@@ -186,6 +177,7 @@
       showLoadingBanner(true);
 
       try {
+        // 1. 抓取預估到站時間
         let response = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
         let data = await response.json();
 
@@ -201,6 +193,15 @@
           alert('找不到該公車路線，請確認車號是否正確！');
           showLoadingBanner(false);
           return;
+        }
+
+        // 2. 抓取即時公車位置 API (RealTimeByFrequency)
+        try {
+          let busPosRes = await fetchWithRetry(`${RENDER_PROXY_URL}/RealTimeByFrequency/City/${currentCity}?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
+          realTimeBuses = await busPosRes.json();
+        } catch (e) {
+          console.warn('無法取得即時公車位置:', e);
+          realTimeBuses = [];
         }
 
         const getSeq = (item) => item.StopSequence !== undefined ? item.StopSequence : (item.Seq || 0);
@@ -235,7 +236,9 @@
       markersLayer.clearLayers();
       let html = '';
       let bounds = [];
+      let routeCoordinates = [];
 
+      // 畫站牌
       stops.forEach((stop, index) => {
         const seqNum = stop.StopSequence !== undefined ? stop.StopSequence : (stop.Seq !== undefined ? stop.Seq : index + 1);
         const stopName = stop.StopName?.Zh_tw || '未知名稱';
@@ -259,16 +262,46 @@
           const lat = stop.StopPosition.PositionLat;
           const lng = stop.StopPosition.PositionLon;
           bounds.push([lat, lng]);
+          routeCoordinates.push([lat, lng]);
 
           L.circleMarker([lat, lng], {
-            radius: 6,
+            radius: 5,
             fillColor: timeStatus.color,
             color: '#ffffff',
-            weight: 2,
+            weight: 1.5,
             fillOpacity: 1
           }).bindPopup(`<b>${stopName}</b><br>預估到站：${timeStatus.text}`)
             .addTo(markersLayer);
         }
+      });
+
+      // 1. 畫路線軌跡虛線
+      if (routeCoordinates.length > 1) {
+        L.polyline(routeCoordinates, {
+          color: '#3b82f6',
+          weight: 4,
+          opacity: 0.6,
+          dashArray: '6, 8'
+        }).addTo(markersLayer);
+      }
+
+      // 2. 標記線上移動的公車小圖示 (即時位置)
+      const currentDirBuses = realTimeBuses.filter(b => b.Direction === currentDirection && b.BusPosition);
+      currentDirBuses.forEach(bus => {
+        const busLat = bus.BusPosition.PositionLat;
+        const busLng = bus.BusPosition.PositionLon;
+        const plateNumb = bus.PlateNumb || '公車';
+
+        const busIcon = L.divIcon({
+          className: 'custom-bus-icon',
+          html: `<div class="bus-icon-marker w-7 h-7 flex items-center justify-center text-xs"><i class="fa-solid fa-bus"></i></div>`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14]
+        });
+
+        L.marker([busLat, busLng], { icon: busIcon })
+          .bindPopup(`<b>車牌：${plateNumb}</b><br>動態：行駛中`)
+          .addTo(markersLayer);
       });
 
       listContainer.innerHTML = html;
