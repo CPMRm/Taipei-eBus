@@ -77,7 +77,7 @@
           <input type="text" id="route-input" placeholder="搜尋公車 (如: 307, 667, 承德幹線)" 
                  class="w-full pl-9 pr-4 py-2.5 bg-gray-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium">
         </div>
-        <button onclick="searchBusRoute()" class="bg-blue-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95 transition">
+        <button onclick="searchBusRoute(true)" class="bg-blue-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95 transition">
           搜尋
         </button>
       </div>
@@ -104,7 +104,7 @@
     <!-- 底部更新狀態欄 -->
     <div class="p-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
       <div class="flex items-center gap-1.5">
-        <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span id="status-dot" class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
         <span id="update-timer">自動更新：30s</span>
       </div>
       <button onclick="refreshData()" class="text-blue-600 font-medium flex items-center gap-1 active:rotate-180 transition">
@@ -130,7 +130,6 @@
     function initMap() {
       map = L.map('map', { zoomControl: false }).setView([25.0478, 121.5170], 13);
       
-      // 使用 OpenStreetMap 免 Key 官方穩定圖資
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 19
@@ -170,7 +169,8 @@
       }
     }
 
-    async function searchBusRoute() {
+    // isManual = true 表示使用者主動點擊搜尋，失敗才跳彈窗
+    async function searchBusRoute(isManual = false) {
       const input = document.getElementById('route-input').value.trim();
       if (!input) return;
 
@@ -178,7 +178,6 @@
       showLoadingBanner(true);
 
       try {
-        // 1. 抓取官方正確站牌順序路線檔 (DisplayStopOfRoute)
         let routeRes = await fetchWithRetry(`${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
         let routeData = await routeRes.json();
 
@@ -191,16 +190,14 @@
         }
 
         if (!routeData || routeData.length === 0) {
-          alert('找不到該公車路線，請確認車號是否正確！');
+          if (isManual) alert('找不到該公車路線，請確認車號是否正確！');
           showLoadingBanner(false);
           return;
         }
 
-        // 2. 抓取預估到站時間 (EstimatedTimeOfArrival)
         let etaRes = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/${currentCity}?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
         let etaData = await etaRes.json();
 
-        // 3. 抓取即時公車位置 (RealTimeByFrequency)
         try {
           let busPosRes = await fetchWithRetry(`${RENDER_PROXY_URL}/RealTimeByFrequency/City/${currentCity}?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
           realTimeBuses = await busPosRes.json();
@@ -208,7 +205,6 @@
           realTimeBuses = [];
         }
 
-        // 建立到站時間對照表 (Key: StopID_Direction)
         const etaMap = new Map();
         if (Array.isArray(etaData)) {
           etaData.forEach(item => {
@@ -218,7 +214,6 @@
           });
         }
 
-        // 對應至官方順序站牌清單
         [0, 1].forEach(dir => {
           const dirStops = routeData.find(r => r.Direction === dir);
           if (dirStops && dirStops.Stops) {
@@ -241,7 +236,6 @@
 
         document.getElementById('direction-tabs').classList.remove('hidden');
         
-        // 抓取去程/返程終點站名稱
         const goDest = busDataCache[0].length > 0 ? busDataCache[0][busDataCache[0].length - 1].StopName.Zh_tw : '去程';
         const backDest = busDataCache[1].length > 0 ? busDataCache[1][busDataCache[1].length - 1].StopName.Zh_tw : '返程';
         
@@ -249,13 +243,22 @@
         document.getElementById('tab-back').innerText = `往 ${backDest}`;
 
         renderStops();
-        startAutoRefresh();
-        expandSheet();
+        if (isManual) expandSheet();
+        
+        // 成功更新，恢復狀態點標誌
+        document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
       } catch (err) {
         console.error('Fetch error:', err);
-        alert('連線超時，請點擊搜尋再試一次！');
+        if (isManual) {
+          alert('連線超時，請再點一次搜尋！');
+        } else {
+          // 背景更新失敗，顯示紅點但不彈窗擾民
+          document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-red-500';
+        }
       } finally {
         showLoadingBanner(false);
+        // 必定重置計時器，防止出現負數號
+        startAutoRefresh();
       }
     }
 
@@ -309,7 +312,6 @@
         }
       });
 
-      // 1. 繪製路線軌跡虛線
       if (routeCoordinates.length > 1) {
         L.polyline(routeCoordinates, {
           color: '#2563eb',
@@ -319,7 +321,6 @@
         }).addTo(markersLayer);
       }
 
-      // 2. 繪製線上即時公車位置
       if (Array.isArray(realTimeBuses)) {
         const currentDirBuses = realTimeBuses.filter(b => b.Direction === currentDirection && b.BusPosition);
         currentDirBuses.forEach(bus => {
@@ -380,10 +381,13 @@
     function startAutoRefresh() {
       clearInterval(autoRefreshTimer);
       countdown = 30;
+      document.getElementById('update-timer').innerText = `自動更新：30s`;
       autoRefreshTimer = setInterval(() => {
         countdown--;
+        if (countdown < 0) countdown = 0;
         document.getElementById('update-timer').innerText = `自動更新：${countdown}s`;
-        if (countdown <= 0) {
+        if (countdown === 0) {
+          clearInterval(autoRefreshTimer);
           refreshData();
         }
       }, 1000);
@@ -391,7 +395,7 @@
 
     async function refreshData() {
       if (!currentRouteName) return;
-      await searchBusRoute();
+      await searchBusRoute(false); // 傳入 false 避開跳出連線警告彈窗
     }
 
     function showLoadingBanner(show) {
