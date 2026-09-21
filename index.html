@@ -38,7 +38,7 @@
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
-    /* 公車 Icon 樣式 */
+    /* 即時公車 Icon 樣式 */
     .bus-icon-marker {
       background: #2563eb;
       color: white;
@@ -130,7 +130,7 @@
     function initMap() {
       map = L.map('map', { zoomControl: false }).setView([25.0478, 121.5170], 13);
       
-      // 使用 OpenStreetMap (OSM) 完全免費、免 Key 官方圖資[span_1](start_span)[span_1](end_span)
+      // 使用 OpenStreetMap 免 Key 官方穩定圖資
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 19
@@ -140,7 +140,7 @@
       markersLayer = L.layerGroup().addTo(map);
     }
 
-    // 手勢滑動抽屜
+    // 手勢拖曳滑動抽屜
     const sheet = document.getElementById('bottom-sheet');
     const header = document.getElementById('sheet-header');
     let startY = 0;
@@ -178,39 +178,75 @@
       showLoadingBanner(true);
 
       try {
-        let response = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
-        let data = await response.json();
+        // 1. 抓取官方正確站牌順序路線檔 (DisplayStopOfRoute)
+        let routeRes = await fetchWithRetry(`${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
+        let routeData = await routeRes.json();
 
-        if (!data || data.length === 0) {
-          response = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/NewTaipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
-          data = await response.json();
+        if (!routeData || routeData.length === 0) {
+          routeRes = await fetchWithRetry(`${RENDER_PROXY_URL}/DisplayStopOfRoute/City/NewTaipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
+          routeData = await routeRes.json();
           currentCity = 'NewTaipei';
         } else {
           currentCity = 'Taipei';
         }
 
-        if (!data || data.length === 0) {
+        if (!routeData || routeData.length === 0) {
           alert('找不到該公車路線，請確認車號是否正確！');
           showLoadingBanner(false);
           return;
         }
 
+        // 2. 抓取預估到站時間 (EstimatedTimeOfArrival)
+        let etaRes = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/${currentCity}?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
+        let etaData = await etaRes.json();
+
+        // 3. 抓取即時公車位置 (RealTimeByFrequency)
         try {
           let busPosRes = await fetchWithRetry(`${RENDER_PROXY_URL}/RealTimeByFrequency/City/${currentCity}?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
           realTimeBuses = await busPosRes.json();
         } catch (e) {
-          console.warn('無法取得即時公車位置:', e);
           realTimeBuses = [];
         }
 
-        const getSeq = (item) => item.StopSequence !== undefined ? item.StopSequence : (item.Seq || 0);
+        // 建立到站時間對照表 (Key: StopID_Direction)
+        const etaMap = new Map();
+        if (Array.isArray(etaData)) {
+          etaData.forEach(item => {
+            if (item.StopID !== undefined) {
+              etaMap.set(`${item.StopID}_${item.Direction}`, item);
+            }
+          });
+        }
 
-        busDataCache[0] = data.filter(d => d.Direction === 0).sort((a,b) => getSeq(a) - getSeq(b));
-        busDataCache[1] = data.filter(d => d.Direction === 1).sort((a,b) => getSeq(a) - getSeq(b));
+        // 對應至官方順序站牌清單
+        [0, 1].forEach(dir => {
+          const dirStops = routeData.find(r => r.Direction === dir);
+          if (dirStops && dirStops.Stops) {
+            busDataCache[dir] = dirStops.Stops.map(stop => {
+              const etaKey = `${stop.StopID}_${dir}`;
+              const eta = etaMap.get(etaKey);
+              return {
+                StopID: stop.StopID,
+                StopSequence: stop.StopSequence,
+                StopName: stop.StopName,
+                StopPosition: stop.StopPosition,
+                EstimateTime: eta ? eta.EstimateTime : null,
+                StopStatus: eta ? eta.StopStatus : 1
+              };
+            });
+          } else {
+            busDataCache[dir] = [];
+          }
+        });
 
         document.getElementById('direction-tabs').classList.remove('hidden');
-        document.getElementById('tab-go').innerText = `往 ${busDataCache[0][0]?.DestinationStopNameZh || '去程'}`;
-        document.getElementById('tab-back').innerText = `往 ${busDataCache[1][0]?.DestinationStopNameZh || '返程'}`;
+        
+        // 抓取去程/返程終點站名稱
+        const goDest = busDataCache[0].length > 0 ? busDataCache[0][busDataCache[0].length - 1].StopName.Zh_tw : '去程';
+        const backDest = busDataCache[1].length > 0 ? busDataCache[1][busDataCache[1].length - 1].StopName.Zh_tw : '返程';
+        
+        document.getElementById('tab-go').innerText = `往 ${goDest}`;
+        document.getElementById('tab-back').innerText = `往 ${backDest}`;
 
         renderStops();
         startAutoRefresh();
@@ -238,7 +274,7 @@
       let routeCoordinates = [];
 
       stops.forEach((stop, index) => {
-        const seqNum = stop.StopSequence !== undefined ? stop.StopSequence : (stop.Seq !== undefined ? stop.Seq : index + 1);
+        const seqNum = stop.StopSequence !== undefined ? stop.StopSequence : index + 1;
         const stopName = stop.StopName?.Zh_tw || '未知名稱';
         const timeStatus = formatEstimateTime(stop.EstimateTime, stop.StopStatus);
 
@@ -273,6 +309,7 @@
         }
       });
 
+      // 1. 繪製路線軌跡虛線
       if (routeCoordinates.length > 1) {
         L.polyline(routeCoordinates, {
           color: '#2563eb',
@@ -282,23 +319,26 @@
         }).addTo(markersLayer);
       }
 
-      const currentDirBuses = realTimeBuses.filter(b => b.Direction === currentDirection && b.BusPosition);
-      currentDirBuses.forEach(bus => {
-        const busLat = bus.BusPosition.PositionLat;
-        const busLng = bus.BusPosition.PositionLon;
-        const plateNumb = bus.PlateNumb || '公車';
+      // 2. 繪製線上即時公車位置
+      if (Array.isArray(realTimeBuses)) {
+        const currentDirBuses = realTimeBuses.filter(b => b.Direction === currentDirection && b.BusPosition);
+        currentDirBuses.forEach(bus => {
+          const busLat = bus.BusPosition.PositionLat;
+          const busLng = bus.BusPosition.PositionLon;
+          const plateNumb = bus.PlateNumb || '公車';
 
-        const busIcon = L.divIcon({
-          className: 'custom-bus-icon',
-          html: `<div class="bus-icon-marker w-7 h-7 flex items-center justify-center text-xs"><i class="fa-solid fa-bus"></i></div>`,
-          iconSize: [28, 28],
-          iconAnchor: [14, 14]
+          const busIcon = L.divIcon({
+            className: 'custom-bus-icon',
+            html: `<div class="bus-icon-marker w-7 h-7 flex items-center justify-center text-xs"><i class="fa-solid fa-bus"></i></div>`,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14]
+          });
+
+          L.marker([busLat, busLng], { icon: busIcon })
+            .bindPopup(`<b>車牌：${plateNumb}</b><br>動態：行駛中`)
+            .addTo(markersLayer);
         });
-
-        L.marker([busLat, busLng], { icon: busIcon })
-          .bindPopup(`<b>車牌：${plateNumb}</b><br>動態：行駛中`)
-          .addTo(markersLayer);
-      });
+      }
 
       listContainer.innerHTML = html;
 
