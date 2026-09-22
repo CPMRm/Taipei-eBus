@@ -56,7 +56,7 @@
   <div id="status-banner" class="hidden absolute top-4 left-4 right-4 z-[1001] bg-amber-500 text-white px-4 py-2.5 rounded-2xl shadow-lg flex items-center justify-between text-xs sm:text-sm animate-bounce">
     <div class="flex items-center gap-2">
       <i class="fa-solid fa-spinner fa-spin text-base"></i>
-      <span>伺服器正在連線中，請稍候...</span>
+      <span id="status-message">伺服器正在連線喚醒中，請稍候...</span>
     </div>
   </div>
 
@@ -118,7 +118,7 @@
 
     let map;
     let markersLayer;
-    let stopMarkers = new Map(); // 儲存站牌 Marker 的引用 (Key: StopID)
+    let stopMarkers = new Map();
     let currentRouteName = '';
     let currentCity = 'Taipei';
     let currentDirection = 0;
@@ -131,7 +131,6 @@
     function initMap() {
       map = L.map('map', { zoomControl: false }).setView([25.0478, 121.5170], 13);
       
-      // 使用 OpenStreetMap 免 Key 官方穩定圖資
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 19
@@ -141,7 +140,6 @@
       markersLayer = L.layerGroup().addTo(map);
     }
 
-    // 手勢拖曳滑動抽屜
     const sheet = document.getElementById('bottom-sheet');
     const header = document.getElementById('sheet-header');
     let startY = 0;
@@ -159,10 +157,14 @@
     function expandSheet() { sheet.style.transform = 'translateY(0)'; isExpanded = true; }
     function collapseSheet() { sheet.style.transform = 'translateY(calc(100% - 140px))'; isExpanded = false; }
 
-    async function fetchWithRetry(url, retries = 2, delay = 2000) {
+    // 重試邏輯優化：增加為重試 4 次、每次間隔 3 秒（專門應對免費伺服器喚醒）
+    async function fetchWithRetry(url, retries = 4, delay = 3000) {
       for (let i = 0; i < retries; i++) {
         try {
-          const response = await fetch(url);
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 12000); // 單次 timeout 設為 12 秒
+          const response = await fetch(url, { signal: controller.signal });
+          clearTimeout(timeoutId);
           if (response.ok) return response;
         } catch (err) {
           if (i === retries - 1) throw err;
@@ -176,7 +178,7 @@
       if (!input) return;
 
       currentRouteName = input;
-      showLoadingBanner(true);
+      showLoadingBanner(true, "伺服器連線中，請稍候...");
 
       try {
         let routeRes = await fetchWithRetry(`${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
@@ -191,8 +193,8 @@
         }
 
         if (!routeData || routeData.length === 0) {
-          if (isManual) alert('找不到該公車路線，請確認車號是否正確！');
-          showLoadingBanner(false);
+          showLoadingBanner(true, "找不到該公車路線，請確認輸入是否有誤！");
+          setTimeout(() => showLoadingBanner(false), 3000);
           return;
         }
 
@@ -247,15 +249,14 @@
         if (isManual) expandSheet();
         
         document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
+        showLoadingBanner(false);
       } catch (err) {
         console.error('Fetch error:', err);
-        if (isManual) {
-          alert('連線超時，請再點一次搜尋！');
-        } else {
-          document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-red-500';
-        }
+        // 不再跳出 alert 彈窗，改在頂部 Banner 提示，過幾秒自動消失
+        showLoadingBanner(true, "連線較慢，正在嘗試重新連線...");
+        setTimeout(() => showLoadingBanner(false), 4000);
+        document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-red-500';
       } finally {
-        showLoadingBanner(false);
         startAutoRefresh();
       }
     }
@@ -280,7 +281,6 @@
         const stopName = stop.StopName?.Zh_tw || '未知名稱';
         const timeStatus = formatEstimateTime(stop.EstimateTime, stop.StopStatus);
 
-        // 加上 onclick 點擊事件，傳入站牌 ID 與座標
         html += `
           <div onclick="focusStop('${stop.StopID}', ${stop.StopPosition?.PositionLat}, ${stop.StopPosition?.PositionLon})" 
                class="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100 hover:bg-blue-50 active:scale-[0.98] transition cursor-pointer">
@@ -323,18 +323,16 @@
         }
       });
 
-      // 1. 繪製精緻風格實線 (Apple / Google 地圖風格)
       if (routeCoordinates.length > 1) {
         L.polyline(routeCoordinates, {
-          color: '#2563eb', // 經典寶藍色
-          weight: 5,        // 適中寬度
-          opacity: 0.75,    // 半透明微感
-          lineCap: 'round', // 圓角起終點
-          lineJoin: 'round' // 平滑轉折點
+          color: '#2563eb',
+          weight: 5,
+          opacity: 0.75,
+          lineCap: 'round',
+          lineJoin: 'round'
         }).addTo(markersLayer);
       }
 
-      // 2. 繪製線上即時公車位置
       if (Array.isArray(realTimeBuses)) {
         const currentDirBuses = realTimeBuses.filter(b => b.Direction === currentDirection && b.BusPosition);
         currentDirBuses.forEach(bus => {
@@ -362,17 +360,11 @@
       }
     }
 
-    // 點擊站牌：地圖平滑飛至該地點，收起抽屜，並打開 Popup
     function focusStop(stopId, lat, lng) {
       if (!lat || !lng) return;
-      
-      // 1. 畫面動畫飛至站牌
       map.flyTo([lat, lng], 16, { duration: 1.2 });
-      
-      // 2. 收起底部抽屜以露出完整地圖視角
       collapseSheet();
 
-      // 3. 打開對應的站牌氣泡視窗
       const marker = stopMarkers.get(stopId);
       if (marker) {
         setTimeout(() => {
@@ -431,8 +423,11 @@
       await searchBusRoute(false);
     }
 
-    function showLoadingBanner(show) {
+    function showLoadingBanner(show, msg = "伺服器正在連線中，請稍候...") {
       const banner = document.getElementById('status-banner');
+      const msgElem = document.getElementById('status-message');
+      if (msgElem) msgElem.innerText = msg;
+      
       if (show) banner.classList.remove('hidden');
       else banner.classList.add('hidden');
     }
