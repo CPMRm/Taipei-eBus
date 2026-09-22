@@ -118,6 +118,7 @@
 
     let map;
     let markersLayer;
+    let stopMarkers = new Map(); // 儲存站牌 Marker 的引用 (Key: StopID)
     let currentRouteName = '';
     let currentCity = 'Taipei';
     let currentDirection = 0;
@@ -130,6 +131,7 @@
     function initMap() {
       map = L.map('map', { zoomControl: false }).setView([25.0478, 121.5170], 13);
       
+      // 使用 OpenStreetMap 免 Key 官方穩定圖資
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 19
@@ -169,7 +171,6 @@
       }
     }
 
-    // isManual = true 表示使用者主動點擊搜尋，失敗才跳彈窗
     async function searchBusRoute(isManual = false) {
       const input = document.getElementById('route-input').value.trim();
       if (!input) return;
@@ -245,19 +246,16 @@
         renderStops();
         if (isManual) expandSheet();
         
-        // 成功更新，恢復狀態點標誌
         document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
       } catch (err) {
         console.error('Fetch error:', err);
         if (isManual) {
           alert('連線超時，請再點一次搜尋！');
         } else {
-          // 背景更新失敗，顯示紅點但不彈窗擾民
           document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-red-500';
         }
       } finally {
         showLoadingBanner(false);
-        // 必定重置計時器，防止出現負數號
         startAutoRefresh();
       }
     }
@@ -272,6 +270,7 @@
       }
 
       markersLayer.clearLayers();
+      stopMarkers.clear();
       let html = '';
       let bounds = [];
       let routeCoordinates = [];
@@ -281,8 +280,10 @@
         const stopName = stop.StopName?.Zh_tw || '未知名稱';
         const timeStatus = formatEstimateTime(stop.EstimateTime, stop.StopStatus);
 
+        // 加上 onclick 點擊事件，傳入站牌 ID 與座標
         html += `
-          <div class="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100 hover:bg-blue-50 transition">
+          <div onclick="focusStop('${stop.StopID}', ${stop.StopPosition?.PositionLat}, ${stop.StopPosition?.PositionLon})" 
+               class="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100 hover:bg-blue-50 active:scale-[0.98] transition cursor-pointer">
             <div class="flex items-center gap-3">
               <span class="w-6 h-6 rounded-full bg-blue-100 text-blue-600 font-bold text-xs flex items-center justify-center flex-shrink-0">
                 ${seqNum}
@@ -301,26 +302,39 @@
           bounds.push([lat, lng]);
           routeCoordinates.push([lat, lng]);
 
-          L.circleMarker([lat, lng], {
+          const marker = L.circleMarker([lat, lng], {
             radius: 5,
             fillColor: timeStatus.color,
             color: '#ffffff',
             weight: 1.5,
             fillOpacity: 1
-          }).bindPopup(`<b>${stopName}</b><br>預估到站：${timeStatus.text}`)
-            .addTo(markersLayer);
+          }).bindPopup(`
+            <div class="text-center p-1">
+              <div class="font-bold text-sm text-gray-800 mb-1">${stopName}</div>
+              <div class="inline-block px-2 py-0.5 rounded text-xs font-bold ${timeStatus.bgClass}">
+                ${timeStatus.text}
+              </div>
+            </div>
+          `).addTo(markersLayer);
+
+          if (stop.StopID) {
+            stopMarkers.set(stop.StopID, marker);
+          }
         }
       });
 
+      // 1. 繪製精緻風格實線 (Apple / Google 地圖風格)
       if (routeCoordinates.length > 1) {
         L.polyline(routeCoordinates, {
-          color: '#2563eb',
-          weight: 4,
-          opacity: 0.6,
-          dashArray: '6, 8'
+          color: '#2563eb', // 經典寶藍色
+          weight: 5,        // 適中寬度
+          opacity: 0.75,    // 半透明微感
+          lineCap: 'round', // 圓角起終點
+          lineJoin: 'round' // 平滑轉折點
         }).addTo(markersLayer);
       }
 
+      // 2. 繪製線上即時公車位置
       if (Array.isArray(realTimeBuses)) {
         const currentDirBuses = realTimeBuses.filter(b => b.Direction === currentDirection && b.BusPosition);
         currentDirBuses.forEach(bus => {
@@ -345,6 +359,25 @@
 
       if (bounds.length > 0) {
         map.fitBounds(bounds, { padding: [50, 50] });
+      }
+    }
+
+    // 點擊站牌：地圖平滑飛至該地點，收起抽屜，並打開 Popup
+    function focusStop(stopId, lat, lng) {
+      if (!lat || !lng) return;
+      
+      // 1. 畫面動畫飛至站牌
+      map.flyTo([lat, lng], 16, { duration: 1.2 });
+      
+      // 2. 收起底部抽屜以露出完整地圖視角
+      collapseSheet();
+
+      // 3. 打開對應的站牌氣泡視窗
+      const marker = stopMarkers.get(stopId);
+      if (marker) {
+        setTimeout(() => {
+          marker.openPopup();
+        }, 800);
       }
     }
 
@@ -395,7 +428,7 @@
 
     async function refreshData() {
       if (!currentRouteName) return;
-      await searchBusRoute(false); // 傳入 false 避開跳出連線警告彈窗
+      await searchBusRoute(false);
     }
 
     function showLoadingBanner(show) {
