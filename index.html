@@ -48,6 +48,13 @@
       line-height: 28px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.3);
     }
+    /* 使用者當前位置定位 Icon */
+    .user-location-marker {
+      background: #06b6d4;
+      border: 3px solid white;
+      border-radius: 50%;
+      box-shadow: 0 0 10px rgba(6, 182, 212, 0.8);
+    }
   </style>
 </head>
 <body class="bg-gray-100 relative">
@@ -56,17 +63,22 @@
   <div id="status-banner" class="hidden absolute top-4 left-4 right-4 z-[1001] bg-amber-500 text-white px-4 py-2.5 rounded-2xl shadow-lg flex items-center justify-between text-xs sm:text-sm animate-bounce">
     <div class="flex items-center gap-2">
       <i class="fa-solid fa-spinner fa-spin text-base"></i>
-      <span id="status-message">伺服器正在連線喚醒中，請稍候...</span>
+      <span id="status-message">伺服器連線中，請稍候...</span>
     </div>
   </div>
 
   <!-- 地圖容器 -->
   <div id="map"></div>
 
+  <!-- 定位按鈕 (定位到我的位置) -->
+  <button onclick="getUserLocation(true)" class="absolute top-4 left-4 z-[1000] bg-white text-gray-700 w-10 h-10 rounded-xl shadow-md flex items-center justify-center active:scale-95 transition">
+    <i class="fa-solid fa-crosshairs text-lg text-blue-600"></i>
+  </button>
+
   <!-- 底部滑動抽屜 (Bottom Sheet) -->
   <div id="bottom-sheet" class="bottom-sheet fixed inset-x-0 bottom-0 max-w-lg mx-auto bg-white rounded-t-3xl shadow-2xl flex flex-col max-h-[85vh] border-t border-gray-100 transform translate-y-[calc(100%-140px)]">
     
-    <!-- 頂部手把與搜尋列（支援手勢拖曳） -->
+    <!-- 頂部手把與搜尋列 -->
     <div id="sheet-header" class="p-4 pb-2 bg-white rounded-t-3xl select-none touch-none">
       <div class="w-12 h-1.5 bg-gray-300 rounded-full mx-auto mb-3 cursor-pointer" onclick="toggleSheet()"></div>
       
@@ -74,7 +86,7 @@
       <div class="flex gap-2">
         <div class="relative flex-1">
           <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
-          <input type="text" id="route-input" placeholder="搜尋公車 (如: 307, 667, 承德幹線)" 
+          <input type="text" id="route-input" placeholder="搜尋公車 (如: 307, 265, 承德幹線)" 
                  class="w-full pl-9 pr-4 py-2.5 bg-gray-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium">
         </div>
         <button onclick="searchBusRoute(true)" class="bg-blue-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95 transition">
@@ -82,8 +94,14 @@
         </button>
       </div>
 
+      <!-- 最近站牌提示條 -->
+      <div id="nearest-stop-banner" class="hidden mt-2.5 px-3 py-1.5 bg-cyan-50 border border-cyan-200 rounded-lg text-xs text-cyan-800 flex items-center gap-1.5 font-medium">
+        <i class="fa-solid fa-location-dot text-cyan-600"></i>
+        <span id="nearest-stop-text">計算離您最近的站牌中...</span>
+      </div>
+
       <!-- 去程/返程 切換頁籤 -->
-      <div id="direction-tabs" class="hidden flex gap-2 mt-3">
+      <div id="direction-tabs" class="hidden flex gap-2 mt-2.5">
         <button id="tab-go" onclick="switchDirection(0)" class="flex-1 py-1.5 rounded-lg text-xs font-bold bg-blue-50 text-blue-600 border border-blue-200">
           往 去程
         </button>
@@ -118,6 +136,8 @@
 
     let map;
     let markersLayer;
+    let userMarker = null;
+    let userLatLng = null; // 儲存使用者目前 GPS 座標
     let stopMarkers = new Map();
     let currentRouteName = '';
     let currentCity = 'Taipei';
@@ -138,8 +158,100 @@
 
       L.control.zoom({ position: 'topright' }).addTo(map);
       markersLayer = L.layerGroup().addTo(map);
+
+      // 初始化時嘗試取得使用者當前位置
+      getUserLocation(false);
     }
 
+    // 取得使用者當前 GPS 位置
+    function getUserLocation(flyToUser = false) {
+      if ('geolocation' in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+            userLatLng = [lat, lng];
+
+            // 繪製或更新使用者位置標籤
+            if (userMarker) {
+              userMarker.setLatLng(userLatLng);
+            } else {
+              const userIcon = L.divIcon({
+                className: 'user-location-marker w-4 h-4',
+                iconSize: [16, 16],
+                iconAnchor: [8, 8]
+              });
+              userMarker = L.marker(userLatLng, { icon: userIcon }).bindPopup('<b>您的當前位置</b>').addTo(map);
+            }
+
+            if (flyToUser) {
+              map.flyTo(userLatLng, 16, { duration: 1.2 });
+            }
+
+            // 如果已經有搜尋公車，重新計算距離
+            calculateNearestStop();
+          },
+          (err) => {
+            if (flyToUser) alert('無法存取您的定位權限，請確認瀏覽器定位設定是否開啟！');
+          },
+          { enableHighAccuracy: true, timeout: 5000 }
+        );
+      }
+    }
+
+    // 計算半徑距離 (Haversine Formula，回傳公尺)
+    function getDistanceInMeters(lat1, lon1, lat2, lon2) {
+      const R = 6371e3;
+      const φ1 = lat1 * Math.PI / 180;
+      const φ2 = lat2 * Math.PI / 180;
+      const Δφ = (lat2 - lat1) * Math.PI / 180;
+      const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+      const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                Math.cos(φ1) * Math.cos(φ2) *
+                Math.sin(Δλ/2) * Math.sin(Δλ/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return Math.round(R * c);
+    }
+
+    // 比對目前路線中距離使用者最近的站牌
+    function calculateNearestStop() {
+      const banner = document.getElementById('nearest-stop-banner');
+      const bannerText = document.getElementById('nearest-stop-text');
+      
+      if (!userLatLng) {
+        banner.classList.add('hidden');
+        return;
+      }
+
+      const stops = busDataCache[currentDirection] || [];
+      if (stops.length === 0) {
+        banner.classList.add('hidden');
+        return;
+      }
+
+      let nearestStop = null;
+      let minDistance = Infinity;
+
+      stops.forEach(stop => {
+        if (stop.StopPosition) {
+          const dist = getDistanceInMeters(userLatLng[0], userLatLng[1], stop.StopPosition.PositionLat, stop.StopPosition.PositionLon);
+          if (dist < minDistance) {
+            minDistance = dist;
+            nearestStop = stop;
+          }
+        }
+      });
+
+      if (nearestStop) {
+        banner.classList.remove('hidden');
+        bannerText.innerHTML = `您離 <b>${nearestStop.StopName.Zh_tw}</b> 最近（距離約 ${minDistance >= 1000 ? (minDistance/1000).toFixed(1) + ' km' : minDistance + ' m'}）`;
+      } else {
+        banner.classList.add('hidden');
+      }
+    }
+
+    // 手勢拖曳滑動抽屜
     const sheet = document.getElementById('bottom-sheet');
     const header = document.getElementById('sheet-header');
     let startY = 0;
@@ -157,12 +269,11 @@
     function expandSheet() { sheet.style.transform = 'translateY(0)'; isExpanded = true; }
     function collapseSheet() { sheet.style.transform = 'translateY(calc(100% - 140px))'; isExpanded = false; }
 
-    // 重試邏輯優化：增加為重試 4 次、每次間隔 3 秒（專門應對免費伺服器喚醒）
     async function fetchWithRetry(url, retries = 4, delay = 3000) {
       for (let i = 0; i < retries; i++) {
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 12000); // 單次 timeout 設為 12 秒
+          const timeoutId = setTimeout(() => controller.abort(), 12000);
           const response = await fetch(url, { signal: controller.signal });
           clearTimeout(timeoutId);
           if (response.ok) return response;
@@ -181,15 +292,43 @@
       showLoadingBanner(true, "伺服器連線中，請稍候...");
 
       try {
-        let routeRes = await fetchWithRetry(`${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
-        let routeData = await routeRes.json();
+        const tpeUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`;
+        const ntpUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/NewTaipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`;
+
+        let [tpeRes, ntpRes] = await Promise.all([
+          fetchWithRetry(tpeUrl).catch(() => null),
+          fetchWithRetry(ntpUrl).catch(() => null)
+        ]);
+
+        let routeData = tpeRes ? await tpeRes.json() : [];
+        if (routeData && routeData.length > 0) {
+          currentCity = 'Taipei';
+        } else {
+          routeData = ntpRes ? await ntpRes.json() : [];
+          if (routeData && routeData.length > 0) {
+            currentCity = 'NewTaipei';
+          }
+        }
 
         if (!routeData || routeData.length === 0) {
-          routeRes = await fetchWithRetry(`${RENDER_PROXY_URL}/DisplayStopOfRoute/City/NewTaipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
-          routeData = await routeRes.json();
-          currentCity = 'NewTaipei';
-        } else {
-          currentCity = 'Taipei';
+          const tpeMatchUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=contains(RouteName/Zh_tw, '${input}')&$format=JSON`;
+          const ntpMatchUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/NewTaipei?$filter=contains(RouteName/Zh_tw, '${input}')&$format=JSON`;
+
+          let [tpeMatchRes, ntpMatchRes] = await Promise.all([
+            fetchWithRetry(tpeMatchUrl).catch(() => null),
+            fetchWithRetry(ntpMatchUrl).catch(() => null)
+          ]);
+
+          let matchTpe = tpeMatchRes ? await tpeMatchRes.json() : [];
+          let matchNtp = ntpMatchRes ? await ntpMatchRes.json() : [];
+
+          if (matchTpe && matchTpe.length > 0) {
+            routeData = matchTpe;
+            currentCity = 'Taipei';
+          } else if (matchNtp && matchNtp.length > 0) {
+            routeData = matchNtp;
+            currentCity = 'NewTaipei';
+          }
         }
 
         if (!routeData || routeData.length === 0) {
@@ -198,11 +337,13 @@
           return;
         }
 
-        let etaRes = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/${currentCity}?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
+        const realRouteName = routeData[0].RouteName.Zh_tw;
+
+        let etaRes = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/${currentCity}?$filter=RouteName/Zh_tw eq '${realRouteName}'&$format=JSON`);
         let etaData = await etaRes.json();
 
         try {
-          let busPosRes = await fetchWithRetry(`${RENDER_PROXY_URL}/RealTimeByFrequency/City/${currentCity}?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`);
+          let busPosRes = await fetchWithRetry(`${RENDER_PROXY_URL}/RealTimeByFrequency/City/${currentCity}?$filter=RouteName/Zh_tw eq '${realRouteName}'&$format=JSON`);
           realTimeBuses = await busPosRes.json();
         } catch (e) {
           realTimeBuses = [];
@@ -246,13 +387,13 @@
         document.getElementById('tab-back').innerText = `往 ${backDest}`;
 
         renderStops();
+        calculateNearestStop(); // 重新計算最近的站牌
         if (isManual) expandSheet();
         
         document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
         showLoadingBanner(false);
       } catch (err) {
         console.error('Fetch error:', err);
-        // 不再跳出 alert 彈窗，改在頂部 Banner 提示，過幾秒自動消失
         showLoadingBanner(true, "連線較慢，正在嘗試重新連線...");
         setTimeout(() => showLoadingBanner(false), 4000);
         document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-red-500';
@@ -401,6 +542,7 @@
       }
 
       renderStops();
+      calculateNearestStop();
     }
 
     function startAutoRefresh() {
