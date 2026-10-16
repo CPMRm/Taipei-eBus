@@ -4,7 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>雙北公車即時動態追蹤</title>
-  
+
+  <!-- PWA 設定 -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="雙北公車">
+  <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3448/3448339.png">
+
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Leaflet.js CSS & JS -->
@@ -38,7 +46,7 @@
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
-    /* 即時公車 Icon 樣式（支援平滑移動動畫） */
+    /* 即時公車 Icon 樣式 */
     .bus-icon-marker {
       background: #2563eb;
       color: white;
@@ -49,7 +57,7 @@
       box-shadow: 0 2px 6px rgba(0,0,0,0.3);
       transition: transform 0.8s linear;
     }
-    /* 使用者當前位置定位 Icon */
+    /* 定位 Icon */
     .user-location-marker {
       background: #06b6d4;
       border: 3px solid white;
@@ -83,16 +91,25 @@
     <div id="sheet-header" class="p-4 pb-2 bg-white rounded-t-3xl select-none touch-none">
       <div class="w-12 h-1.5 bg-gray-300 rounded-full mx-auto mb-3 cursor-pointer" onclick="toggleSheet()"></div>
       
-      <!-- 搜尋列 -->
+      <!-- 搜尋列與收藏按鈕 -->
       <div class="flex gap-2">
         <div class="relative flex-1">
           <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
           <input type="text" id="route-input" placeholder="搜尋公車 (如: 307, 265, 承德幹線)" 
-                 class="w-full pl-9 pr-4 py-2.5 bg-gray-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium">
+                 class="w-full pl-9 pr-10 py-2.5 bg-gray-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium">
+          <!-- ⭐ 收藏星號按鈕 -->
+          <button id="bookmark-btn" onclick="toggleBookmarkCurrentRoute()" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-300 hover:text-amber-400 p-1 transition">
+            <i class="fa-solid fa-star text-lg"></i>
+          </button>
         </div>
-        <button onclick="searchBusRoute(true)" class="bg-blue-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95 transition">
+        <button onclick="triggerSearchFromInput()" class="bg-blue-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold active:scale-95 transition">
           搜尋
         </button>
+      </div>
+
+      <!-- 常用收藏路線晶片 (Chips) -->
+      <div id="favorites-container" class="flex gap-1.5 overflow-x-auto pt-2.5 no-scrollbar hidden">
+        <!-- JS 動態渲染收藏標籤 -->
       </div>
 
       <!-- 最近站牌提示條 -->
@@ -116,7 +133,7 @@
     <div class="flex-1 overflow-y-auto p-4 space-y-2 no-scrollbar" id="stop-list">
       <div class="text-center py-8 text-gray-400 text-sm">
         <i class="fa-solid fa-bus text-3xl mb-2 text-gray-300"></i>
-        <p>請輸入公車路線開始查詢</p>
+        <p>請輸入公車路線或點擊上方收藏開始查詢</p>
       </div>
     </div>
 
@@ -124,7 +141,7 @@
     <div class="p-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
       <div class="flex items-center gap-1.5">
         <span id="status-dot" class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-        <span id="update-timer">自動更新：30s</span>
+        <span id="update-timer">自動更新：15s</span>
       </div>
       <button onclick="refreshData()" class="text-blue-600 font-medium flex items-center gap-1 active:rotate-180 transition">
         <i class="fa-solid fa-rotate-right"></i> 手動更新
@@ -147,10 +164,13 @@
     let currentCity = 'Taipei';
     let currentDirection = 0;
     let autoRefreshTimer = null;
-    let countdown = 30;
+    let countdown = 15; // 改為 15 秒快速更新
     let busDataCache = { 0: [], 1: [] };
     let realTimeBuses = [];
     let isExpanded = false;
+
+    // 收藏夾資料庫 (localStorage)
+    let favorites = JSON.parse(localStorage.getItem('bus_favorites') || '[]');
 
     function initMap() {
       map = L.map('map', { zoomControl: false }).setView([25.0478, 121.5170], 13);
@@ -166,8 +186,71 @@
       busLayerGroup = L.layerGroup().addTo(map);
 
       getUserLocation(false);
+      renderFavoritesChips();
+
+      // 註冊 PWA Service Worker
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js').catch(err => console.log('SW register failed:', err));
+      }
     }
 
+    // --- 收藏夾功能 ---
+    function renderFavoritesChips() {
+      const container = document.getElementById('favorites-container');
+      if (favorites.length === 0) {
+        container.classList.add('hidden');
+        return;
+      }
+
+      container.classList.remove('hidden');
+      container.innerHTML = favorites.map(route => `
+        <button onclick="quickSearchRoute('${route}')" 
+                class="px-3 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-full text-xs font-semibold flex items-center gap-1.5 flex-shrink-0 transition active:scale-95">
+          <i class="fa-solid fa-star text-amber-500"></i>
+          <span>${route}</span>
+        </button>
+      `).join('');
+    }
+
+    function updateStarIcon() {
+      const btn = document.getElementById('bookmark-btn');
+      if (!currentRouteName) {
+        btn.className = "absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-300 hover:text-amber-400 p-1 transition";
+        return;
+      }
+
+      const isFav = favorites.includes(currentRouteName);
+      if (isFav) {
+        btn.className = "absolute right-2.5 top-1/2 -translate-y-1/2 text-amber-400 p-1 transition";
+      } else {
+        btn.className = "absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-300 hover:text-amber-400 p-1 transition";
+      }
+    }
+
+    function toggleBookmarkCurrentRoute() {
+      if (!currentRouteName) return;
+      const index = favorites.indexOf(currentRouteName);
+      if (index > -1) {
+        favorites.splice(index, 1);
+      } else {
+        favorites.push(currentRouteName);
+      }
+      localStorage.setItem('bus_favorites', JSON.stringify(favorites));
+      updateStarIcon();
+      renderFavoritesChips();
+    }
+
+    function quickSearchRoute(routeName) {
+      document.getElementById('route-input').value = routeName;
+      searchBusRouteByName(routeName, true);
+    }
+
+    function triggerSearchFromInput() {
+      const input = document.getElementById('route-input').value.trim();
+      if (input) searchBusRouteByName(input, true);
+    }
+
+    // --- 定位與距離計算 ---
     function getUserLocation(flyToUser = false) {
       if ('geolocation' in navigator) {
         navigator.geolocation.getCurrentPosition(
@@ -283,9 +366,7 @@
       }
     }
 
-    // 主搜尋邏輯 (只在按下搜尋按鈕時呼叫)
-    async function searchBusRoute(isManual = false) {
-      const input = document.getElementById('route-input').value.trim();
+    async function searchBusRouteByName(input, isManual = false) {
       if (!input) return;
 
       showLoadingBanner(true, "伺服器連線中，請稍候...");
@@ -337,6 +418,7 @@
         }
 
         currentRouteName = routeData[0].RouteName.Zh_tw;
+        updateStarIcon();
 
         busLayerGroup.clearLayers();
         busMarkers.clear();
@@ -383,7 +465,6 @@
       }
     }
 
-    // 輕量背景/手動更新 (防呆強化，不清空既有公車)
     async function fetchLiveDynamicData() {
       if (!currentRouteName) return;
 
@@ -395,10 +476,10 @@
           let busPosRes = await fetchWithRetry(`${RENDER_PROXY_URL}/RealTimeByFrequency/City/${currentCity}?$filter=RouteName/Zh_tw eq '${currentRouteName}'&$format=JSON`);
           let newBusData = await busPosRes.json();
           if (Array.isArray(newBusData)) {
-            realTimeBuses = newBusData; // 只有成功取得陣列時才覆蓋
+            realTimeBuses = newBusData;
           }
         } catch (e) {
-          console.warn('公車位置更新失敗，保留舊位置資料');
+          console.warn('公車位置更新失敗，保留舊位置');
         }
 
         const etaMap = new Map();
@@ -555,7 +636,6 @@
         }
       });
 
-      // 防呆：唯有明確收到新的公車清單時，才移除駛離的公車
       for (const [plate, marker] of busMarkers.entries()) {
         if (!activePlates.has(plate)) {
           busLayerGroup.removeLayer(marker);
