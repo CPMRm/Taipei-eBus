@@ -46,7 +46,7 @@
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
-    /* 即時公車 Icon 樣式 */
+    /* 即時公車 Icon 樣式 (平滑移動動畫) */
     .bus-icon-marker {
       background: #2563eb;
       color: white;
@@ -164,12 +164,12 @@
     let currentCity = 'Taipei';
     let currentDirection = 0;
     let autoRefreshTimer = null;
-    let countdown = 15; // 改為 15 秒快速更新
+    let countdown = 15;
     let busDataCache = { 0: [], 1: [] };
     let realTimeBuses = [];
     let isExpanded = false;
 
-    // 收藏夾資料庫 (localStorage)
+    // 收藏夾 (localStorage)
     let favorites = JSON.parse(localStorage.getItem('bus_favorites') || '[]');
 
     function initMap() {
@@ -188,7 +188,6 @@
       getUserLocation(false);
       renderFavoritesChips();
 
-      // 註冊 PWA Service Worker
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('sw.js').catch(err => console.log('SW register failed:', err));
       }
@@ -220,11 +219,9 @@
       }
 
       const isFav = favorites.includes(currentRouteName);
-      if (isFav) {
-        btn.className = "absolute right-2.5 top-1/2 -translate-y-1/2 text-amber-400 p-1 transition";
-      } else {
-        btn.className = "absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-300 hover:text-amber-400 p-1 transition";
-      }
+      btn.className = isFav ? 
+        "absolute right-2.5 top-1/2 -translate-y-1/2 text-amber-400 p-1 transition" : 
+        "absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-300 hover:text-amber-400 p-1 transition";
     }
 
     function toggleBookmarkCurrentRoute() {
@@ -366,14 +363,17 @@
       }
     }
 
+    // 主搜尋邏輯
     async function searchBusRouteByName(input, isManual = false) {
       if (!input) return;
 
+      clearInterval(autoRefreshTimer);
+      const cleanInput = input.trim();
       showLoadingBanner(true, "伺服器連線中，請稍候...");
 
       try {
-        const tpeUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`;
-        const ntpUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/NewTaipei?$filter=RouteName/Zh_tw eq '${input}'&$format=JSON`;
+        const tpeUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=RouteName/Zh_tw eq '${cleanInput}'&$format=JSON`;
+        const ntpUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/NewTaipei?$filter=RouteName/Zh_tw eq '${cleanInput}'&$format=JSON`;
 
         let [tpeRes, ntpRes] = await Promise.all([
           fetchWithRetry(tpeUrl).catch(() => null),
@@ -391,8 +391,8 @@
         }
 
         if (!routeData || routeData.length === 0) {
-          const tpeMatchUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=contains(RouteName/Zh_tw, '${input}')&$format=JSON`;
-          const ntpMatchUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/NewTaipei?$filter=contains(RouteName/Zh_tw, '${input}')&$format=JSON`;
+          const tpeMatchUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=contains(RouteName/Zh_tw, '${cleanInput}')&$format=JSON`;
+          const ntpMatchUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/NewTaipei?$filter=contains(RouteName/Zh_tw, '${cleanInput}')&$format=JSON`;
 
           let [tpeMatchRes, ntpMatchRes] = await Promise.all([
             fetchWithRetry(tpeMatchUrl).catch(() => null),
@@ -414,6 +414,7 @@
         if (!routeData || routeData.length === 0) {
           showLoadingBanner(true, "找不到該公車路線，請確認輸入是否有誤！");
           setTimeout(() => showLoadingBanner(false), 3000);
+          startAutoRefresh();
           return;
         }
 
@@ -422,6 +423,7 @@
 
         busLayerGroup.clearLayers();
         busMarkers.clear();
+        stopMarkers.clear();
 
         [0, 1].forEach(dir => {
           const dirStops = routeData.find(r => r.Direction === dir);
@@ -446,6 +448,9 @@
         
         document.getElementById('tab-go').innerText = `往 ${goDest}`;
         document.getElementById('tab-back').innerText = `往 ${backDest}`;
+
+        currentDirection = 0;
+        switchDirection(0);
 
         renderRouteBase();
         await fetchLiveDynamicData();
