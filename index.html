@@ -351,11 +351,11 @@
     function expandSheet() { sheet.style.transform = 'translateY(0)'; isExpanded = true; }
     function collapseSheet() { sheet.style.transform = 'translateY(calc(100% - 140px))'; isExpanded = false; }
 
-    async function fetchWithRetry(url, retries = 4, delay = 3000) {
+    async function fetchWithRetry(url, retries = 3, delay = 1500) {
       for (let i = 0; i < retries; i++) {
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 12000);
+          const timeoutId = setTimeout(() => controller.abort(), 10000);
           const response = await fetch(url, { signal: controller.signal });
           clearTimeout(timeoutId);
           if (response.ok) return response;
@@ -366,65 +366,64 @@
       }
     }
 
-    // 主搜尋邏輯（加入 Request ID 鎖防舊資料蓋新資料）
+    // 輔助 API 請求方法：單獨依序搜尋，減少並發 Rate Limit 壓力
+    async function queryDisplayStop(city, filterStr) {
+      try {
+        const encodedFilter = encodeURIComponent(filterStr);
+        const url = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/${city}?$filter=${encodedFilter}&$format=JSON`;
+        const res = await fetchWithRetry(url, 2, 1000);
+        if (res) {
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) return data;
+        }
+      } catch (e) {
+        console.warn(`Query ${city} failed:`, e);
+      }
+      return null;
+    }
+
+    // 主搜尋邏輯
     async function searchBusRouteByName(input, isManual = false) {
       if (!input) return;
 
       clearInterval(autoRefreshTimer);
-      const requestId = ++activeRequestId; // 產生當前請求的唯一版本 ID
+      const requestId = ++activeRequestId;
       const cleanInput = input.trim();
       showLoadingBanner(true, "伺服器連線中，請稍候...");
 
       try {
-        const tpeUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=RouteName/Zh_tw eq '${cleanInput}'&$format=JSON`;
-        const ntpUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/NewTaipei?$filter=RouteName/Zh_tw eq '${cleanInput}'&$format=JSON`;
+        let routeData = null;
 
-        let [tpeRes, ntpRes] = await Promise.all([
-          fetchWithRetry(tpeUrl).catch(() => null),
-          fetchWithRetry(ntpUrl).catch(() => null)
-        ]);
-
-        if (requestId !== activeRequestId) return; // 如果已經發起新搜尋，放棄此舊回應
-
-        let routeData = tpeRes ? await tpeRes.json() : [];
-        if (routeData && routeData.length > 0) {
+        // 1. 依序對台北市與新北市做精準查詢（降低 API 發送量）
+        routeData = await queryDisplayStop('Taipei', `RouteName/Zh_tw eq '${cleanInput}'`);
+        if (routeData) {
           currentCity = 'Taipei';
         } else {
-          routeData = ntpRes ? await ntpRes.json() : [];
-          if (routeData && routeData.length > 0) {
+          routeData = await queryDisplayStop('NewTaipei', `RouteName/Zh_tw eq '${cleanInput}'`);
+          if (routeData) {
             currentCity = 'NewTaipei';
           }
         }
 
-        if (!routeData || routeData.length === 0) {
-          const tpeMatchUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/Taipei?$filter=contains(RouteName/Zh_tw, '${cleanInput}')&$format=JSON`;
-          const ntpMatchUrl = `${RENDER_PROXY_URL}/DisplayStopOfRoute/City/NewTaipei?$filter=contains(RouteName/Zh_tw, '${cleanInput}')&$format=JSON`;
-
-          let [tpeMatchRes, ntpMatchRes] = await Promise.all([
-            fetchWithRetry(tpeMatchUrl).catch(() => null),
-            fetchWithRetry(ntpMatchUrl).catch(() => null)
-          ]);
-
-          if (requestId !== activeRequestId) return;
-
-          let matchTpe = tpeMatchRes ? await tpeMatchRes.json() : [];
-          let matchNtp = ntpMatchRes ? await ntpMatchRes.json() : [];
-
-          if (matchTpe && matchTpe.length > 0) {
-            routeData = matchTpe;
+        // 2. 如果精準比對找不到，依序嘗試模糊查詢 contains
+        if (!routeData) {
+          routeData = await queryDisplayStop('Taipei', `contains(RouteName/Zh_tw, '${cleanInput}')`);
+          if (routeData) {
             currentCity = 'Taipei';
-          } else if (matchNtp && matchNtp.length > 0) {
-            routeData = matchNtp;
-            currentCity = 'NewTaipei';
+          } else {
+            routeData = await queryDisplayStop('NewTaipei', `contains(RouteName/Zh_tw, '${cleanInput}')`);
+            if (routeData) {
+              currentCity = 'NewTaipei';
+            }
           }
         }
 
+        if (requestId !== activeRequestId) return;
+
         if (!routeData || routeData.length === 0) {
-          if (requestId === activeRequestId) {
-            showLoadingBanner(true, "找不到該公車路線，請確認輸入是否有誤！");
-            setTimeout(() => showLoadingBanner(false), 3000);
-            startAutoRefresh();
-          }
+          showLoadingBanner(true, "找不到該公車路線，請確認輸入是否有誤！");
+          setTimeout(() => showLoadingBanner(false), 3000);
+          startAutoRefresh();
           return;
         }
 
@@ -491,12 +490,13 @@
       const targetReqId = reqId || activeRequestId;
 
       try {
-        let etaRes = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/${currentCity}?$filter=RouteName/Zh_tw eq '${currentRouteName}'&$format=JSON`);
-        let etaData = await etaRes.json();
+        const encodedRouteName = encodeURIComponent(currentRouteName);
+        let etaRes = await fetchWithRetry(`${RENDER_PROXY_URL}/EstimatedTimeOfArrival/City/${currentCity}?$filter=RouteName/Zh_tw eq '${encodedRouteName}'&$format=JSON`, 2, 1000);
+        let etaData = etaRes ? await etaRes.json() : [];
 
         try {
-          let busPosRes = await fetchWithRetry(`${RENDER_PROXY_URL}/RealTimeByFrequency/City/${currentCity}?$filter=RouteName/Zh_tw eq '${currentRouteName}'&$format=JSON`);
-          let newBusData = await busPosRes.json();
+          let busPosRes = await fetchWithRetry(`${RENDER_PROXY_URL}/RealTimeByFrequency/City/${currentCity}?$filter=RouteName/Zh_tw eq '${encodedRouteName}'&$format=JSON`, 2, 1000);
+          let newBusData = busPosRes ? await busPosRes.json() : null;
           if (Array.isArray(newBusData)) {
             realTimeBuses = newBusData;
           }
@@ -504,7 +504,7 @@
           console.warn('公車位置更新失敗，保留舊位置');
         }
 
-        if (targetReqId !== activeRequestId) return; // 已有新的搜尋，放棄此舊動態資料
+        if (targetReqId !== activeRequestId) return;
 
         const etaMap = new Map();
         if (Array.isArray(etaData)) {
