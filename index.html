@@ -136,14 +136,14 @@
     const RENDER_PROXY_URL = 'https://bus-api-tw.onrender.com/api/bus';
 
     let map;
-    let stopsLayerGroup; // 站牌與路線繪製圖層
-    let busLayerGroup;   // 公車車輛繪製圖層
-    let busMarkers = new Map(); // Key: 車牌號碼
+    let stopsLayerGroup;
+    let busLayerGroup;
+    let busMarkers = new Map();
     let userMarker = null;
     let userLatLng = null;
     let stopMarkers = new Map();
     
-    let currentRouteName = ''; // 紀錄真實搜尋到的路線全名
+    let currentRouteName = '';
     let currentCity = 'Taipei';
     let currentDirection = 0;
     let autoRefreshTimer = null;
@@ -162,7 +162,6 @@
 
       L.control.zoom({ position: 'topright' }).addTo(map);
       
-      // 使用兩個獨立圖層，防止 clearLayers 時干擾公車圖示
       stopsLayerGroup = L.layerGroup().addTo(map);
       busLayerGroup = L.layerGroup().addTo(map);
 
@@ -284,7 +283,7 @@
       }
     }
 
-    // 主搜尋邏輯 (發送完整請求)
+    // 主搜尋邏輯 (只在按下搜尋按鈕時呼叫)
     async function searchBusRoute(isManual = false) {
       const input = document.getElementById('route-input').value.trim();
       if (!input) return;
@@ -337,14 +336,11 @@
           return;
         }
 
-        // 保存搜尋到的精準路線全名（例如：265區）
         currentRouteName = routeData[0].RouteName.Zh_tw;
 
-        // 清空舊公車 Marker
         busLayerGroup.clearLayers();
         busMarkers.clear();
 
-        // 整理官方路線站牌
         [0, 1].forEach(dir => {
           const dirStops = routeData.find(r => r.Direction === dir);
           if (dirStops && dirStops.Stops) {
@@ -369,10 +365,7 @@
         document.getElementById('tab-go').innerText = `往 ${goDest}`;
         document.getElementById('tab-back').innerText = `往 ${backDest}`;
 
-        // 繪製靜態站牌與路線
         renderRouteBase();
-        
-        // 抓取動態 ETA 與即時位置
         await fetchLiveDynamicData();
 
         calculateNearestStop();
@@ -390,7 +383,7 @@
       }
     }
 
-    // 抓取「到站時間 (ETA)」與「即時公車位置」輕量更新
+    // 輕量背景/手動更新 (防呆強化，不清空既有公車)
     async function fetchLiveDynamicData() {
       if (!currentRouteName) return;
 
@@ -400,9 +393,12 @@
 
         try {
           let busPosRes = await fetchWithRetry(`${RENDER_PROXY_URL}/RealTimeByFrequency/City/${currentCity}?$filter=RouteName/Zh_tw eq '${currentRouteName}'&$format=JSON`);
-          realTimeBuses = await busPosRes.json();
+          let newBusData = await busPosRes.json();
+          if (Array.isArray(newBusData)) {
+            realTimeBuses = newBusData; // 只有成功取得陣列時才覆蓋
+          }
         } catch (e) {
-          realTimeBuses = [];
+          console.warn('公車位置更新失敗，保留舊位置資料');
         }
 
         const etaMap = new Map();
@@ -414,7 +410,6 @@
           });
         }
 
-        // 將最新到站時間更新進快取
         [0, 1].forEach(dir => {
           if (busDataCache[dir]) {
             busDataCache[dir].forEach(stop => {
@@ -426,7 +421,6 @@
           }
         });
 
-        // 重新繪製列表文字狀態與動態公車 Marker
         renderStopsUI();
         updateBusMarkers();
         document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
@@ -436,7 +430,6 @@
       }
     }
 
-    // 畫基礎路線與站牌點 (唯有切換路線時才重新畫)
     function renderRouteBase() {
       stopsLayerGroup.clearLayers();
       stopMarkers.clear();
@@ -484,7 +477,6 @@
       }
     }
 
-    // 刷新站牌列表與站牌 Popup 內容
     function renderStopsUI() {
       const listContainer = document.getElementById('stop-list');
       const stops = busDataCache[currentDirection] || [];
@@ -515,7 +507,6 @@
           </div>
         `;
 
-        // 同時更新地圖站牌 Popup 的文字狀態
         const marker = stopMarkers.get(stop.StopID);
         if (marker) {
           marker.setStyle({ fillColor: timeStatus.color });
@@ -533,7 +524,6 @@
       listContainer.innerHTML = html;
     }
 
-    // 專門更新公車 Marker (平滑移動，絕不消失)
     function updateBusMarkers() {
       if (!Array.isArray(realTimeBuses)) return;
 
@@ -547,11 +537,9 @@
         activePlates.add(plateNumb);
 
         if (busMarkers.has(plateNumb)) {
-          // 平滑移動座標
           const marker = busMarkers.get(plateNumb);
           marker.setLatLng([busLat, busLng]);
         } else {
-          // 建立新 Marker
           const busIcon = L.divIcon({
             className: 'custom-bus-icon',
             html: `<div class="bus-icon-marker w-7 h-7 flex items-center justify-center text-xs"><i class="fa-solid fa-bus"></i></div>`,
@@ -567,7 +555,7 @@
         }
       });
 
-      // 移除離線公車
+      // 防呆：唯有明確收到新的公車清單時，才移除駛離的公車
       for (const [plate, marker] of busMarkers.entries()) {
         if (!activePlates.has(plate)) {
           busLayerGroup.removeLayer(marker);
@@ -642,7 +630,7 @@
 
     async function refreshData() {
       if (!currentRouteName) return;
-      await fetchLiveDynamicData(); // 自動更新只抓到站時間與即時位置，速度超快且極度穩定！
+      await fetchLiveDynamicData();
       startAutoRefresh();
     }
 
