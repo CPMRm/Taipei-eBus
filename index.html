@@ -615,8 +615,8 @@
 
     function startAutoRefresh() {
       clearInterval(autoRefreshTimer);
-      countdown = 30;
-      document.getElementById('update-timer').innerText = `自動更新：30s`;
+      countdown = 15;
+      document.getElementById('update-timer').innerText = `自動更新：15s`;
       autoRefreshTimer = setInterval(() => {
         countdown--;
         if (countdown < 0) countdown = 0;
