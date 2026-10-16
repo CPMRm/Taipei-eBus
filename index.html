@@ -38,7 +38,7 @@
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
-    /* 即時公車 Icon 樣式 */
+    /* 即時公車 Icon 樣式（增加平滑移動 transition 效果） */
     .bus-icon-marker {
       background: #2563eb;
       color: white;
@@ -47,6 +47,7 @@
       text-align: center;
       line-height: 28px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      transition: transform 1s linear;
     }
     /* 使用者當前位置定位 Icon */
     .user-location-marker {
@@ -136,8 +137,9 @@
 
     let map;
     let markersLayer;
+    let busMarkers = new Map(); // 專門儲存公車車輛的 Marker (Key: 車牌號碼)
     let userMarker = null;
-    let userLatLng = null; // 儲存使用者目前 GPS 座標
+    let userLatLng = null;
     let stopMarkers = new Map();
     let currentRouteName = '';
     let currentCity = 'Taipei';
@@ -159,11 +161,9 @@
       L.control.zoom({ position: 'topright' }).addTo(map);
       markersLayer = L.layerGroup().addTo(map);
 
-      // 初始化時嘗試取得使用者當前位置
       getUserLocation(false);
     }
 
-    // 取得使用者當前 GPS 位置
     function getUserLocation(flyToUser = false) {
       if ('geolocation' in navigator) {
         navigator.geolocation.getCurrentPosition(
@@ -172,7 +172,6 @@
             const lng = position.coords.longitude;
             userLatLng = [lat, lng];
 
-            // 繪製或更新使用者位置標籤
             if (userMarker) {
               userMarker.setLatLng(userLatLng);
             } else {
@@ -188,7 +187,6 @@
               map.flyTo(userLatLng, 16, { duration: 1.2 });
             }
 
-            // 如果已經有搜尋公車，重新計算距離
             calculateNearestStop();
           },
           (err) => {
@@ -199,7 +197,6 @@
       }
     }
 
-    // 計算半徑距離 (Haversine Formula，回傳公尺)
     function getDistanceInMeters(lat1, lon1, lat2, lon2) {
       const R = 6371e3;
       const φ1 = lat1 * Math.PI / 180;
@@ -214,7 +211,6 @@
       return Math.round(R * c);
     }
 
-    // 比對目前路線中距離使用者最近的站牌
     function calculateNearestStop() {
       const banner = document.getElementById('nearest-stop-banner');
       const bannerText = document.getElementById('nearest-stop-text');
@@ -251,7 +247,6 @@
       }
     }
 
-    // 手勢拖曳滑動抽屜
     const sheet = document.getElementById('bottom-sheet');
     const header = document.getElementById('sheet-header');
     let startY = 0;
@@ -387,7 +382,7 @@
         document.getElementById('tab-back').innerText = `往 ${backDest}`;
 
         renderStops();
-        calculateNearestStop(); // 重新計算最近的站牌
+        calculateNearestStop();
         if (isManual) expandSheet();
         
         document.getElementById('status-dot').className = 'inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
@@ -474,29 +469,50 @@
         }).addTo(markersLayer);
       }
 
+      // 公車 Marker 動態座標平滑更新機制
       if (Array.isArray(realTimeBuses)) {
         const currentDirBuses = realTimeBuses.filter(b => b.Direction === currentDirection && b.BusPosition);
+        const activePlates = new Set();
+
         currentDirBuses.forEach(bus => {
           const busLat = bus.BusPosition.PositionLat;
           const busLng = bus.BusPosition.PositionLon;
           const plateNumb = bus.PlateNumb || '公車';
+          activePlates.add(plateNumb);
 
-          const busIcon = L.divIcon({
-            className: 'custom-bus-icon',
-            html: `<div class="bus-icon-marker w-7 h-7 flex items-center justify-center text-xs"><i class="fa-solid fa-bus"></i></div>`,
-            iconSize: [28, 28],
-            iconAnchor: [14, 14]
-          });
+          if (busMarkers.has(plateNumb)) {
+            // 如果該車牌的公車已存在，平滑移動 setLatLng 至新位置
+            const marker = busMarkers.get(plateNumb);
+            marker.setLatLng([busLat, busLng]);
+          } else {
+            // 不存在則建立新的公車 Marker
+            const busIcon = L.divIcon({
+              className: 'custom-bus-icon',
+              html: `<div class="bus-icon-marker w-7 h-7 flex items-center justify-center text-xs"><i class="fa-solid fa-bus"></i></div>`,
+              iconSize: [28, 28],
+              iconAnchor: [14, 14]
+            });
 
-          L.marker([busLat, busLng], { icon: busIcon })
-            .bindPopup(`<b>車牌：${plateNumb}</b><br>動態：行駛中`)
-            .addTo(markersLayer);
+            const marker = L.marker([busLat, busLng], { icon: busIcon })
+              .bindPopup(`<b>車牌：${plateNumb}</b><br>動態：行駛中`)
+              .addTo(markersLayer);
+
+            busMarkers.set(plateNumb, marker);
+          }
         });
+
+        // 移除已經離線或駛離該方向的公車 Marker
+        for (const [plate, marker] of busMarkers.entries()) {
+          if (!activePlates.has(plate)) {
+            markersLayer.removeLayer(marker);
+            busMarkers.delete(plate);
+          }
+        }
       }
 
       listContainer.innerHTML = html;
 
-      if (bounds.length > 0) {
+      if (bounds.length > 0 && busMarkers.size === 0) {
         map.fitBounds(bounds, { padding: [50, 50] });
       }
     }
@@ -530,6 +546,7 @@
 
     function switchDirection(dir) {
       currentDirection = dir;
+      busMarkers.clear(); // 切換方向時清空舊公車 Marker
       const tabGo = document.getElementById('tab-go');
       const tabBack = document.getElementById('tab-back');
 
